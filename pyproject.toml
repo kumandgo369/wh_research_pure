@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "hyperliquid-python-sdk>=0.24.0",
     "matplotlib>=3.11.2",
     "pandas>=3.0.6",
     "pathlib>=1.0.1",
