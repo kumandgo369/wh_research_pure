@@ -10,6 +10,10 @@ wheels/
 .venv
 
 # Database files
-data/*.db
-data/*.db-wal
-data/*.db-shm
+/data/
+
+# My folders
+wip/
+
+# credentials
+.env/
