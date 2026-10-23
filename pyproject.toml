@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "altair>=6.3.0",
     "cryptohftdata>=0.8.0",
     "hyperliquid-python-sdk>=0.24.0",
     "matplotlib>=3.11.2",
