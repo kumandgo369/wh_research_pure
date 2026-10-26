@@ -13,11 +13,12 @@ dependencies = [
     "hyperliquid-python-sdk>=0.24.0",
     "matplotlib>=3.11.2",
     "pandas>=3.0.6",
-    "pathlib>=1.0.1",
     "polars>=2.0.0",
     "pyarrow>=26.0.0",
+    "ruff>=0.17.2",
     "scikit-learn>=1.9.1",
     "seaborn>=0.13.2",
+    "tenacity>=9.2.1",
 ]
 
 [project.scripts]

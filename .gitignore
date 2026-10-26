@@ -17,3 +17,6 @@ wip/
 
 # credentials
 .env/
+
+# ruff 
+.ruff_cache/
