@@ -28,7 +28,7 @@ delistings, end up at least as fresh as the funding they validate.
 ## Run the following command to download / update OHLCV panel data
 
 ```Shell
-uv run python scripts/download_candles.py --interval 1h --verbose 
+uv run python scripts/download_candles.py --interval 1h --verbose
 uv run python scripts/download_candles.py --interval 1d --verbose
 ```
 
@@ -45,5 +45,3 @@ uv run python scripts/download_funding.py --verbose
 Both scripts expose their work as `update_candles(interval)` and
 `update_funding()`, which return the number of rows written and leave logging to
 the caller. `update_data.py` uses those; `main()` is only the CLI wrapper.
-
----

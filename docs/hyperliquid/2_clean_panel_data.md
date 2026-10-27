@@ -12,8 +12,9 @@ candles = load_candles("1h")  # trimmed, checked, invalid rows dropped
 funding = load_funding()  # checked, delisting placeholders dropped
 ```
 
-Both return a tidy frame with the flag columns removed. `funding_hour` stays on
-the funding frame, because that is what candles join on.
+Both return a tidy frame with the flag columns removed. The funding frame keeps
+`time` (the raw settlement stamp) and `funding_hour` (that stamp truncated to the
+hour), because `funding_hour` is what candles join on.
 
 Pass `clean=False` to get everything back with the flags intact, which is what
 you want when inspecting rather than analysing:
@@ -40,6 +41,59 @@ Three things the loaders get right that are easy to get wrong by hand:
 - **Both filters, not one.** Dropping only `~is_valid` leaves 622,166 artificial
   zeros in the frame.
 
+---
+
+## Timestamps and alignment
+
+Read this before joining funding to candles or building features.
+
+**A funding entry describes the hour *before* its timestamp.** The entry stamped
+`T` is the settlement paid at `T` for holding through `[T-1h, T)`. It is a
+realised, backward-looking quantity, known as of `T`.
+
+That is not in Hyperliquid's docs, so it is established from the data: for every
+perp listed since the 1h file begins, the first funding entry arrives exactly one
+hour after the symbol's first traded 1h candle, and the last entry lands at or
+one hour after the last traded candle.
+
+**A candle describes the hour *after* its `open_time`.** The bar with
+`open_time = T` covers `[T, T+1h)`.
+
+So `funding_hour == open_time` is the correct join, and it is safe:
+
+```Python
+panel = candles.join(
+    funding.select("symbol", "funding_hour", "funding_rate", "premium"),
+    left_on=["symbol", "open_time"],
+    right_on=["symbol", "funding_hour"],
+    how="left",
+)
+```
+
+The funding value on a row is known at that row's `open_time`; the row's own
+return is the hour that follows it. Features from `funding_rate` on that row,
+labelled with that row's return, carry no look-ahead. `funding_hour` is unique
+per `(symbol, hour)` — `duplicate_hour` fires on nothing — so the join cannot
+fan out.
+
+Four ways to reintroduce look-ahead anyway:
+
+- **Joining funding at `T` to the bar opening at `T-1h`.** That bar *is* the hour
+  the funding was measured over, so a model given both is reading the settlement
+  of a return it is trying to predict.
+- **Executing at the same `open_time` you read funding from.** 571 settlements
+  are recorded late, up to 23.9 minutes past the hour, so at `T` exactly those
+  values do not exist yet. Lag the funding feature one bar, or trade the next
+  open, if the strategy is sensitive to it.
+- **Forward-filling across the 8-hourly era** (before 2023-06-08, below). One 8h
+  rate spread over 8 hours is both a fabricated observation and 8× too large.
+  Start the sample at 2023-06-08, or divide pre-switch rates by 8.
+- **Building the panel on 1h candles.** `hl_funding.parquet` holds 235 symbols and
+  `hl_candles_1d.parquet` 234, but the 1h file holds only the 196 listed in the
+  last ~208 days. Delisted perps are absent from it entirely, so a 1h panel is
+  survivorship-biased by construction. Use daily candles for anything spanning
+  history, and treat the 1h file as a recent window.
+
 Everything below is the manual path, for when you are checking the cleaning
 itself rather than using it.
 
@@ -48,36 +102,26 @@ itself rather than using it.
 ## Cleaning OHLCV data
 
 ```Python
-# Step 1, import the cleaning functions
 from wh_research_pure.data_util.hyperliquid_clean import (
     flag_invalid_candles,
     trim_leading_zero_volume,
 )
 
-# Step 2, read the data file
 df = pl.read_parquet(DATA_PATH)
-
-# Step 3, remove rows where volume = 0 until the first row where volume != 0
-df = trim_leading_zero_volume(df)
-
-# Step 4, perform data check
+df = trim_leading_zero_volume(df)  # must come first, see above
 df = flag_invalid_candles(df)
-
-# Step 5, check for invalid rows
-print(df.filter(pl.col("is_valid") == False))
-
-# Step 6, decide what you want to do with invalid rows
+print(df.filter(~pl.col("is_valid")))  # currently empty in both files
 ```
 
-Note that candles have **no gaps**: every step in both files is exactly one
-interval, because the API emits a bar even when nothing trades (1,697 such bars
-in the 1h file, 74 in the 1d). There are also no *trailing* zero-volume candles
-— the candle API stops at delisting, unlike funding — so `trim_leading_zero_volume`
-has no counterpart.
+Candles have **no gaps**: every step in both files is exactly one interval,
+because the API emits a bar even when nothing trades (1,697 such zero-volume
+bars in the 1h file, 74 in the 1d). There are no *trailing* zero-volume candles
+either — the candle API stops at delisting, unlike funding — so
+`trim_leading_zero_volume` has no counterpart.
 
 ---
 
-## Cleaning Funding data
+## Cleaning funding data
 
 Funding has two separate problems, and they need two separate flags.
 
@@ -91,7 +135,6 @@ either `0` or `NaN`. Those rows pass every integrity check, so nothing but
 any cross-sectional funding average.
 
 ```Python
-# Step 1, import the cleaning functions
 from wh_research_pure.data_util.hyperliquid_clean import (
     flag_invalid_funding,
     flag_after_delisting,
@@ -99,65 +142,51 @@ from wh_research_pure.data_util.hyperliquid_clean import (
     funding_gaps,
 )
 
-# Step 2, read the funding data and the daily candles.
 # Use 1d candles for the cross-check: they span the full history, while
 # hl_candles_1h.parquet only holds the last ~208 days (MAX_CANDLES), so delisted
 # symbols are missing from it entirely and it confirms nothing.
 df = pl.read_parquet(FUNDING_PATH)
 candles = pl.read_parquet(CANDLES_1D_PATH)
 
-# Step 3, integrity check -> is_valid
-df = flag_invalid_funding(df)
+df = flag_invalid_funding(df)  # integrity -> is_valid
+df = flag_after_delisting(df, candles)  # relevance -> after_delisting
 
-# Step 4, relevance check -> after_delisting.
-# The flag is the run of zero funding_rate reaching the end of a symbol's
-# history. Passing candles cross-checks it: a row is only flagged if the symbol
-# has no traded candle at or after it, so a symbol that kept trading is never
-# flagged however its funding prints.
-df = flag_after_delisting(df, candles)
-
-# Step 5, eyeball the cross-check before trusting it.
-# lag_hours is the time from the symbol's last traded candle to the start of its
-# tail. It should be small (currently 3-82h, median 11h, which is what 1d candle
-# granularity implies). A large value means the tail started well before trading
-# stopped, so that symbol needs a look.
+# Eyeball the cross-check before trusting it. lag_hours is the time from the
+# symbol's last traded candle to the start of its tail; it should be small
+# (currently 3-82h, median 11h, which is what 1d candle granularity implies).
+# A large value means the tail started well before trading stopped.
 print(delisting_summary(df, candles))
 
-# Step 6, check the integrity failures that are NOT just delisting placeholders
+# Integrity failures that are NOT just delisting placeholders
 print(df.filter(~pl.col("is_valid") & ~pl.col("after_delisting")))
 
-# Step 7, keep only rows that are both sound and still relevant
+# Keep only rows that are both sound and still relevant
 clean = df.filter(pl.col("is_valid") & ~pl.col("after_delisting"))
 
-# Step 8, gaps. Run this on `clean`, never on the raw frame: a gap inside a
-# delisting tail is meaningless, and rows dropped as invalid look like gaps.
-# funding_gaps knows the settlement schedule, so the 8-hourly era is not
-# reported as missing; see below.
+# Gaps. Run on `clean`, never on the raw frame: a gap inside a delisting tail is
+# meaningless, and rows dropped as invalid look like gaps. funding_gaps reads
+# the settlement schedule, so the 8-hourly era is not reported as missing.
 print(funding_gaps(clean))
 ```
 
-### Hour assignment and late settlements
+### Hour assignment
 
-`funding_hour` **truncates**, and `funding_offset` is how late the settlement was
-recorded. Every entry in the data is stamped at or after the hour it belongs to
-(minimum offset exactly 0, no negative offsets anywhere), so truncating is
-always the correct assignment and the offset is always non-negative.
+`funding_hour` **truncates** `time`, and `funding_offset` is how late the
+settlement was recorded. Every entry is stamped at or after the hour it belongs
+to (minimum offset exactly 0, no negative offsets anywhere), so truncating is
+always the correct assignment and the offset is always non-negative. Rounding
+would push a late settlement into the *following* hour and collide with that
+hour's own entry.
 
-Rounding, which this used to do, was wrong in two ways at once: anything more
-than 30 minutes late was pushed into the *following* hour, colliding with that
-hour's own entry, and the measured distance was capped at 30 minutes so the
-mis-assignment was invisible. It happened to be harmless on the current data
-only because nothing is more than 24 minutes late.
+The exchange records a settlement late now and then — 571 rows, the latest 23.9
+minutes past the hour, in bursts that hit every listed symbol at once, so they
+look like recovery after an outage. These are real settlements and are kept.
+`OFF_HOUR_TOLERANCE_MINUTES` (30) only catches rows so late that their hour
+becomes genuinely ambiguous; it currently fires on nothing.
 
-The exchange records a settlement late now and then — 571 rows, at 1.8, 1.9,
-4.2, 14.8 and 23.9 minutes, in bursts that hit every listed symbol at once, so
-they look like recovery after an outage. These are real settlements and are
-kept. `OFF_HOUR_TOLERANCE_MINUTES` (30) only catches rows so late that the hour
-they belong to becomes genuinely ambiguous; it currently fires on nothing.
-
-A row recorded more than an hour late is still undetectable from its timestamp
-alone — it is indistinguishable from an on-time entry for the next hour, and
-surfaces as a `duplicate_hour` or a gap instead of a large offset.
+A row recorded more than an hour late is undetectable from its timestamp alone —
+it is indistinguishable from an on-time entry for the next hour, and surfaces as
+a `duplicate_hour` or a gap instead of a large offset.
 
 ### Funding was 8-hourly before 2023-06-08
 
@@ -177,14 +206,10 @@ A step longer than its interval but shorter than two of them skips nothing and
 is not reported. That is what the 9-hour step across the switch is, for symbols
 whose last 8-hourly settlement was at 16:00 on 2023-06-07.
 
-Measured per consecutive step across the whole history: **4,251,566** one-hour,
-**1,789** eight-hour, **207** two-hour, and a single five-hour.
+### The gap picture
 
-### The real gap picture
-
-Fixing the interval drops the gap table from 1,997 rows / 12,734 missing hours to
-**208 rows / 211 missing settlements** — and all 211 are in the hourly era, in
-five events:
+With the schedule applied, the gap table is **208 rows / 211 missing
+settlements**, all in the hourly era, in five events:
 
 | hour missed | symbols | settlements | what |
 |---|---|---|---|
@@ -204,15 +229,15 @@ missing for every listed symbol at once. There is no pagination bug in
 ### Why the flag is the zero-rate run and not the missing premium
 
 `premium` is `NaN` rather than null for part of the history, which is easy to
-misread (VS Code Data Wrangler reports both as "missing"). But the API switched
-from `NaN` premium to `premium = 0.0` at `2024-07-01 12:00`, so a missing-premium
-test only catches tails that were already running before that date — 4,420 rows
-of the 622,166. The zero-rate run has no such cutoff.
+misread (VS Code Data Wrangler reports both as "missing"). But `NaN` premium
+stops after `2024-07-01 12:00`, so a missing-premium test only catches tails that
+were already running before that date — 4,420 rows of the 622,166. The zero-rate
+run has no such cutoff.
 
 The run is also precise, not just complete: of the 622,184 rows in the file with
 `funding_rate == 0`, it flags 622,166 and correctly leaves 18 alone. Those 18 are
-genuine zero-funding hours mid-history on live symbols (AIXBT, BNB, TURBO, and
-the CANTO and ZRO glitch windows), which still carry a real premium.
+genuine zero-funding hours mid-history on live symbols, which still carry a real
+premium.
 
 `MIN_DELISTED_TAIL_HOURS` (24) keeps a brief quiet patch in a live market from
 being read as a delisting. The shortest real tail so far is ~1,500 hours, so the
