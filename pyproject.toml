@@ -15,7 +15,6 @@ dependencies = [
     "pandas>=3.0.6",
     "polars>=2.0.0",
     "pyarrow>=26.0.0",
-    "ruff>=0.17.2",
     "scikit-learn>=1.9.1",
     "seaborn>=0.13.2",
     "tenacity>=9.2.1",
@@ -27,3 +26,8 @@ wh-research-pure = "wh_research_pure:main"
 [build-system]
 requires = ["uv_build>=0.12.15,<0.13.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.3",
+]
