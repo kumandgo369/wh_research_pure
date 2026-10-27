@@ -13,7 +13,7 @@ uv run python scripts/download_candles.py --interval 1d --verbose
 
 ## Run the following command to download / update hourly funding panel data
 
-```
+```Shell
 uv run python scripts/download_funding.py --verbose
 ```
 
