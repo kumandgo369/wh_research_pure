@@ -53,33 +53,25 @@ def write_atomic(df, path):
     tmp_path.replace(path)
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Download max Hyperliquid candles for all perp symbols"
-    )
-    parser.add_argument("--interval", default="1h", choices=INTERVALS.keys())
-    parser.add_argument(
-        "--verbose", action="store_true", help="Show per-symbol debug logs"
-    )
-    args = parser.parse_args()
-
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-
-    new = download_all_symbols_candles_max(args.interval)
+def update_candles(interval):
+    """
+    Download the latest candles for one interval and merge them into data/.
+    Returns the number of rows written, or 0 if there was nothing to write.
+    Callers that orchestrate several downloads use this instead of main(), so
+    they configure logging once themselves.
+    """
+    new = download_all_symbols_candles_max(interval)
 
     if new.is_empty():
         logger.warning("No candles downloaded, nothing written")
-        return
+        return 0
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = DATA_DIR / f"hl_candles_{args.interval}.parquet"
+    out_path = DATA_DIR / f"hl_candles_{interval}.parquet"
 
     if out_path.exists():
         old = pl.read_parquet(out_path)
-        warn_on_gaps(old, new, args.interval)
+        warn_on_gaps(old, new, interval)
         df = merge_candles(old, new)
         logger.info(
             "Merged: %d existing + %d downloaded -> %d rows",
@@ -95,6 +87,25 @@ def main():
     logger.info(
         "Wrote %d rows (%d symbols) to %s", df.height, df["symbol"].n_unique(), out_path
     )
+    return df.height
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Download max Hyperliquid candles for all perp symbols"
+    )
+    parser.add_argument("--interval", default="1h", choices=INTERVALS.keys())
+    parser.add_argument(
+        "--verbose", action="store_true", help="Show per-symbol debug logs"
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    update_candles(args.interval)
 
 
 if __name__ == "__main__":
