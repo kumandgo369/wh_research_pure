@@ -22,3 +22,10 @@ print(df.filter(pl.col("is_valid") == False))
 
 # Step 6, decide what you want to do with invalid rows
 ```
+
+---
+
+## Cleaning Funding data
+
+```Python
+```
