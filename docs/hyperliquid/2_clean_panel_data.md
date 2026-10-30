@@ -12,8 +12,24 @@ funding = load_funding()
 
 | | columns returned | sorted by |
 |---|---|---|
-| `load_candles` | `open_time, close_time, symbol, interval, open, close, high, low, volume, trades` | `symbol, open_time` |
+| `load_candles` | `bar_end, symbol, interval, open, close, high, low, volume, trades` | `symbol, bar_end` |
 | `load_funding` | `time, symbol, funding_rate, premium, funding_hour` | `symbol, time` |
+
+Both loaders carry a grid-aligned timestamp, and in both it means the same thing:
+**the instant at which every value in the row is known.**
+
+| column | on | means |
+|---|---|---|
+| `bar_end` | candles | exclusive end of the bar; it opened at `bar_end - interval` |
+| `funding_hour` | funding | the settlement hour; `time` is the raw stamp, a few ms later |
+
+A candle stamped `2026-04-02 04:00` is the hour `[03:00, 04:00)` - finished,
+realised, safe to read at 04:00. Nothing in either file is stamped before it is
+knowable, which is what makes `bar_end == funding_hour` the right join and
+`.over("bar_end")` a safe cross-sectional group. There is no `open_time` or
+`close_time`: both were dropped, because a bar's OHLCV is not known when it
+opens and `close_time` was always `open_time + interval - 1ms`, carrying no
+information of its own.
 
 Arguments, both loaders:
 
@@ -30,7 +46,7 @@ Arguments, both loaders:
 ## What `load_candles(interval)` does
 
 1. `pl.read_parquet(data_dir / f"hl_candles_{interval}.parquet")`
-2. `trim_leading_zero_volume` — sorts by `symbol, open_time`, then per symbol
+2. `trim_leading_zero_volume` — sorts by `symbol, bar_end`, then per symbol
    drops every row before the first with `volume > 0`. **This is also what sets
    the output sort order.**
 3. `flag_invalid_candles` — adds six boolean columns
@@ -176,7 +192,7 @@ FUNDING_CAP, OFF_HOUR_MIN, MIN_TAIL_H = 0.04, 30, 24
 # candles == load_candles("1d")
 candles = (
     pl.read_parquet(DATA / "hl_candles_1d.parquet")
-    .sort("symbol", "open_time")
+    .sort("symbol", "bar_end")
     .filter((pl.col("volume") > 0).cast(pl.Int32).cum_sum().over("symbol") > 0)
     .filter(
         ~(
@@ -197,7 +213,7 @@ last_trade = (
     pl.read_parquet(DATA / "hl_candles_1d.parquet")
     .filter(pl.col("volume") > 0)
     .group_by("symbol")
-    .agg(last_trade=pl.col("open_time").max())
+    .agg(last_trade=pl.col("bar_end").max())
 )
 
 funding = (
@@ -248,7 +264,7 @@ funding = (
   it silently falls back to the weaker signal, because every delisted symbol is
   missing from it. `load_funding` reads the 1d file itself, and warns if it is
   absent.
-- **Both filters, not one.** Dropping only `~is_valid` leaves 623,566 artificial
+- **Both filters, not one.** Dropping only `~is_valid` leaves 622,929 artificial
   zeros in the frame.
 
 ---
@@ -263,9 +279,10 @@ funding.filter(~pl.col("is_valid") | pl.col("after_delisting"))
 ```Python
 from wh_research_pure.data_util.hyperliquid_clean import delisting_summary, funding_gaps
 
-# One row per delisted symbol. lag_hours = last traded candle -> start of the
-# zero-funding tail. Currently 3-82h, median 11h, which is what 1d candle
-# granularity implies. A large value means that symbol needs a look.
+# One row per delisted symbol. lag_hours = end of the last traded candle ->
+# start of the zero-funding tail. Currently 0-58h, median 0h: the tail usually
+# begins in the first hour after the last traded day ends. A large value means
+# that symbol needs a look.
 delisting_summary(raw_funding, daily_candles)
 
 # Missing settlements. Run on the CLEAN frame: a gap inside a delisting tail is
@@ -317,31 +334,42 @@ removes. Gaps are exchange-wide, never per-symbol.
 **Why the delisting flag is the zero-rate run, not the missing premium.**
 `premium` is `NaN` rather than null for part of the history (Data Wrangler shows
 both as "missing"), but NaN premium stops after 2024-07-01 12:00, so a
-missing-premium test catches only 4,420 of the 623,566 rows. The zero-rate run
-has no such cutoff and is precise: of 623,584 rows with `funding_rate == 0` it
-flags 623,566 and leaves 18 alone — genuine zero-funding hours on live symbols
-that still carry a real premium. The shortest real tail is 1,512 hours, so the
-24-hour threshold is nowhere near binding.
+missing-premium test catches only 4,371 of the 622,929 rows. The zero-rate run
+has no such cutoff: of 623,584 rows with `funding_rate == 0` it flags 622,929 and
+leaves 655 alone. The shortest real tail is 1,500 hours, so the 24-hour threshold
+is nowhere near binding.
+
+Those 655 are the limit of what daily candles can resolve. The cross-check only
+flags a funding row when **no traded bar ends at or after it**, so for a symbol
+whose last traded daily bar ends at midnight, the zero-rate hours inside that
+final day are left alone: the bar proves the symbol traded at some point that
+day, not that it traded in any particular hour of it. Erring this way keeps real
+rows at the cost of 637 placeholders, 0.015% of the clean frame. Anchoring on the
+bar's start instead would flag those 637 but would also flag hours the symbol
+demonstrably traded through.
 
 ---
 
 ## Joining funding to candles
 
-A funding row stamped `T` describes the hour **before** `T`; a candle row stamped
-`T` describes the hour **after** it. So:
+Both series stamp a row at the instant its contents become known, and both
+describe the hour that just ended, so the join is an equality on the two stamps:
 
 ```Python
 panel = candles.join(
     funding.select("symbol", "funding_hour", "funding_rate", "premium"),
-    left_on=["symbol", "open_time"],
+    left_on=["symbol", "bar_end"],
     right_on=["symbol", "funding_hour"],
     how="left",
 )
 ```
 
-`funding_hour` is unique per `(symbol, hour)`, so this cannot fan out. Joining on
-`close_time` matches **zero rows** — `close_time` is `:59:59.999`, never on an
-hour boundary.
+`funding_hour` is unique per `(symbol, hour)`, so this cannot fan out. On the
+current 1h file it matches **every row** — 904,722 of 904,722.
+
+Both sides of that row describe the same hour, so both are features. The label is
+the one thing you build forward, explicitly, with a `shift` over the symbol — and
+the row whose label comes back null is the one you predict on.
 
 Full treatment, including the asof variant and the look-ahead traps:
 [3_funding_lookahead_bias.md](3_funding_lookahead_bias.md).

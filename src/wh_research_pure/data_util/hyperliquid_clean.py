@@ -30,7 +30,7 @@ def trim_leading_zero_volume(df):
     Per symbol, drop candles before the first candle with volume > 0.
     Zero-volume candles after trading has started are kept.
     """
-    return df.sort("symbol", "open_time").filter(
+    return df.sort("symbol", "bar_end").filter(
         (pl.col("volume") > 0).cast(pl.Int32).cum_sum().over("symbol") > 0
     )
 
@@ -91,11 +91,15 @@ MIN_DELISTED_TAIL_HOURS = 24
 
 
 def _last_trade_time(candles):
-    """Last candle open_time per symbol that actually traded."""
+    """
+    Per symbol, the bar_end of the last candle that actually traded - the last
+    instant the symbol is known to have been trading. A funding row stamped
+    later than this has no traded bar ending at or after it.
+    """
     return (
         candles.filter(pl.col("volume") > 0)
         .group_by("symbol")
-        .agg(pl.col("open_time").max().alias("last_trade"))
+        .agg(pl.col("bar_end").max().alias("last_trade"))
     )
 
 

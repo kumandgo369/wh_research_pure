@@ -36,10 +36,11 @@ INTERVALS = {
     "1w": 10080,
 }
 
-# Schema of the candles df returned by the download functions
+# Schema of the candles df returned by the download functions. bar_end is the
+# exclusive end of the bar - the bar start plus one interval - so every value in
+# the row is known at that instant and the stamp sits on the interval grid.
 CANDLE_SCHEMA = {
-    "open_time": pl.Datetime(time_unit="us", time_zone="UTC"),
-    "close_time": pl.Datetime(time_unit="us", time_zone="UTC"),
+    "bar_end": pl.Datetime(time_unit="us", time_zone="UTC"),
     "symbol": pl.String,
     "interval": pl.String,
     "open": pl.Float64,
@@ -53,10 +54,10 @@ CANDLE_SCHEMA = {
 # Maximum candles API can retrieve
 MAX_CANDLES = 5000
 
-# Column map for renaming columns in candles polars df
+# Column map for renaming columns in candles polars df. The API's two timestamps
+# are left out on purpose: t is the bar start, which bar_end is derived from, and
+# T is redundant with it. Both are dropped once bar_end exists.
 COLUMN_MAP = {
-    "t": "open_time",
-    "T": "close_time",
     "s": "symbol",
     "i": "interval",
     "o": "open",
@@ -153,6 +154,28 @@ def _get_universe_symbols_list():
     return symbols
 
 
+def _warn_on_unexpected_close(df, symbol, interval):
+    """
+    bar_end comes from the bar's start plus one interval, never from the API's
+    own close stamp, so it always lands on the interval grid. Hyperliquid's T has
+    been exactly bar_end - 1ms on every candle downloaded so far; this warns
+    rather than raises if that stops being true, because the bar is still usable.
+    """
+    actual = (
+        pl.from_epoch(pl.col("T"), time_unit="ms")
+        .dt.replace_time_zone(time_zone="UTC")
+        .cast(CANDLE_SCHEMA["bar_end"])
+    )
+    odd = df.filter(actual != pl.col("bar_end") - pl.duration(milliseconds=1)).height
+    if odd:
+        logger.warning(
+            "%s %s: %d candles whose API close stamp is not bar_end - 1ms",
+            symbol,
+            interval,
+            odd,
+        )
+
+
 def _download_symbol_candles_start(symbol, interval, start_date):
     """
     Download candles for a single symbol
@@ -174,17 +197,26 @@ def _download_symbol_candles_start(symbol, interval, start_date):
     if not candles:
         return pl.DataFrame()
 
-    return (
+    df = (
         pl.DataFrame(candles)
         .rename(COLUMN_MAP)
         .with_columns(
             pl.col("open", "close", "high", "low", "volume").cast(pl.Float64),
-            pl.from_epoch(
-                pl.col("open_time", "close_time"), time_unit="ms"
-            ).dt.replace_time_zone(time_zone="UTC"),
+            bar_end=(
+                pl.from_epoch(pl.col("t"), time_unit="ms").dt.replace_time_zone(
+                    time_zone="UTC"
+                )
+                + pl.duration(minutes=INTERVALS[interval])
+            ).cast(CANDLE_SCHEMA["bar_end"]),
         )
-        .filter(pl.col("close_time") <= now)
-        .sort("open_time")
+    )
+
+    _warn_on_unexpected_close(df, symbol, interval)
+
+    # bar_end <= now keeps only bars that have finished, so the in-progress bar
+    # is never written.
+    return (
+        df.select(list(CANDLE_SCHEMA)).filter(pl.col("bar_end") <= now).sort("bar_end")
     )
 
 
@@ -242,7 +274,7 @@ def download_all_symbols_candles_max(interval):
     if not frames:
         return pl.DataFrame(schema=CANDLE_SCHEMA)
 
-    return pl.concat(frames).sort("symbol", "open_time")
+    return pl.concat(frames).sort("symbol", "bar_end")
 
 
 def _download_symbol_funding(symbol, start_ms):

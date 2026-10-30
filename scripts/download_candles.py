@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 # Project root is one level above scripts/
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
-KEY = ["symbol", "open_time"]
+KEY = ["symbol", "bar_end"]
 
 
 def merge_candles(old, new):
@@ -30,9 +30,9 @@ def warn_on_gaps(old, new, interval):
     step = pl.duration(minutes=INTERVALS[interval])
     gaps = (
         old.group_by("symbol")
-        .agg(pl.col("open_time").max().alias("old_last"))
+        .agg(pl.col("bar_end").max().alias("old_last"))
         .join(
-            new.group_by("symbol").agg(pl.col("open_time").min().alias("new_first")),
+            new.group_by("symbol").agg(pl.col("bar_end").min().alias("new_first")),
             on="symbol",
         )
         .filter(pl.col("new_first") > pl.col("old_last") + step)

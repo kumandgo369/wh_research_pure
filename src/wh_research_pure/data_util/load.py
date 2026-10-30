@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).resolve().parents[3] / "data"
 
 # Columns the flag functions add, dropped unless the caller wants them.
-# funding_hour is not in here: it is the key funding joins to candles on.
+# funding_hour is not in here: it is the key candles join to funding on.
 CANDLE_FLAGS = (
     "bad_high_low",
     "bad_high",
@@ -107,7 +107,8 @@ def load_funding(clean=True, keep_flags=None, data_dir=DATA_DIR):
     when a perp stops trading. If that file is missing the check falls back to
     the funding data alone, which is weaker, so it says so.
 
-    funding_hour survives in both cases: it is what candles join on.
+    funding_hour survives in both cases: it is the grid-aligned stamp candles
+    join to, on bar_end == funding_hour.
     """
     keep_flags = _resolve_keep_flags(keep_flags, clean)
 

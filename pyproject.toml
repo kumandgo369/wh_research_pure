@@ -12,6 +12,7 @@ dependencies = [
     "cryptohftdata>=0.8.0",
     "hyperliquid-python-sdk>=0.24.0",
     "matplotlib>=3.11.2",
+    "numpy>=2.5.4",
     "pandas>=3.0.6",
     "polars>=2.0.0",
     "pyarrow>=26.0.0",
