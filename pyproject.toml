@@ -11,6 +11,7 @@ dependencies = [
     "altair>=6.3.0",
     "cryptohftdata>=0.8.0",
     "hyperliquid-python-sdk>=0.24.0",
+    "jupyter>=1.1.1",
     "matplotlib>=3.11.2",
     "numpy>=2.5.4",
     "pandas>=3.0.6",
